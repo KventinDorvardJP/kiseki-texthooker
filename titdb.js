@@ -1,6 +1,9 @@
 const japanese = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 const pageSize = 24;
 const cacheLimit = 20;
+const coldSteelIII = 8;
+const boxBreak = /<br\s*\/?>\s*<br\s*\/?>/gi;
+const coldSteelIIIVoiceLink = /<a href="javascript:void\(0\)" class="dialogue-line" data-audio="talk\/8\/[\w.-]+\.opus">([\s\S]*?)<\/a>/gu;
 export const maxLineLength = 1000;
 
 function searchTerms(text) {
@@ -12,6 +15,8 @@ function searchTerms(text) {
 
 const narrowDigits = text => text.replace(/[０-９]/gu, digit => digit.normalize('NFKC'));
 const wideDigits = text => text.replace(/[0-9]/gu, digit => String.fromCharCode(digit.charCodeAt(0) + 0xfee0));
+// Cold Steel III's heart glyph can be extracted as the single CP932 character ㈱.
+const fixColdSteelIIIHeart = text => text.replaceAll('㈱', '♥');
 
 function normalize(text) {
   // Some captures omit dialogue dashes just before a line break. Keep inline dashes.
@@ -25,6 +30,7 @@ const entities = { amp: '&', apos: "'", quot: '"', lt: '<', gt: '>', nbsp: ' ' }
 
 function dialogueFromMarkup(markup) {
   const text = markup
+    .replace(coldSteelIIIVoiceLink, '$1')
     .replace(/<(rt|rp)>[^<>]*<\/\1>/gi, '')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/?(?:ruby|rb)>/gi, '');
@@ -36,28 +42,145 @@ function dialogueFromMarkup(markup) {
   });
 }
 
-function matchRows(rows, gameId, captured) {
+function splitAgentCapture(text) {
+  const [firstLine, ...rest] = text.split(/\r\n?|\n/u);
+  const speaker = firstLine.trim().normalize('NFC');
+  return speaker && rest.length ? { speaker, dialogue: rest.join('\n') } : null;
+}
+
+function comparisonCapture(text, agentCapture) {
+  return {
+    fullText: normalize(text),
+    dialogue: agentCapture && normalize(agentCapture.dialogue),
+    speaker: agentCapture?.speaker,
+  };
+}
+
+function matchesCapturedSpeaker(row, capture) {
+  return capture.dialogue && typeof row.jpnChrName === 'string'
+    && row.jpnChrName.trim().normalize('NFC') === capture.speaker;
+}
+
+function targetsForSpeaker(row, capture) {
+  return matchesCapturedSpeaker(row, capture) ? [capture.fullText, capture.dialogue] : [capture.fullText];
+}
+
+function japaneseBoxes(row) {
+  return row.jpnHtmlText.split(boxBreak).map(box => normalize(dialogueFromMarkup(box) ?? ''));
+}
+
+function matchingBoxes(dialogues) {
+  return dialogues.flatMap(({ row, targets }) => {
+    const boxes = japaneseBoxes(row);
+    if (boxes.length < 2 || boxes.includes('')) return [];
+    return boxes.flatMap((box, index) => targets.includes(box)
+      ? [{ row, index, count: boxes.length, previousBox: boxes[index - 1] }]
+      : []);
+  });
+}
+
+const compactSpaces = text => text.trim().replace(/\s+/gu, ' ');
+const compactExclamations = text => compactSpaces(text)
+  .replace(/\b[A-Z]{4,}(?=!)/gu, word => word.replace(/([A-Z])\1{2,}/gu, '$1$1'));
+
+function boxLocalization({ row, index, count }) {
+  if (typeof row.engHtmlText !== 'string') return null;
+  const boxes = row.engHtmlText.split(boxBreak).map(box => compactSpaces(dialogueFromMarkup(box) ?? ''));
+  if (boxes.length !== count || boxes.some(box => !box)) return null;
+  if (boxes.join(' ') !== compactSpaces(row.engSearchText ?? '')) return null;
+  return boxes[index];
+}
+
+function matched(row, english) {
+  const speaker = typeof row.engChrName === 'string' ? row.engChrName.trim() : '';
+  return { status: 'matched', english, ...(speaker && { speaker }) };
+}
+
+function agreedMatch(candidates, compareEnglish = compactSpaces) {
+  const first = candidates[0]?.result;
+  if (!first) return null;
+  const english = compareEnglish(first.english);
+  return candidates.every(({ result }) => result && result.speaker === first.speaker
+    && compareEnglish(result.english) === english) ? first : null;
+}
+
+function validateRows(rows, gameId) {
   if (!Array.isArray(rows) || rows.some(row => row?.gameId !== gameId
       || typeof row.jpnHtmlText !== 'string' || typeof row.jpnSearchText !== 'string'
       || !(row.engSearchText === null || typeof row.engSearchText === 'string'))) {
     throw new Error('Unexpected TITDB search results');
   }
+}
+
+function rowsEndingWithCapture(rows, gameId, capture) {
+  validateRows(rows, gameId);
+  if (rows.length >= pageSize) return [];
+  return rows.filter(row => {
+    const boxes = japaneseBoxes(row);
+    if (boxes.includes('')) return false;
+    const targets = targetsForSpeaker(row, capture);
+    return targets.includes(boxes.at(-1)) || targets.includes(boxes.join(''));
+  });
+}
+
+function followsInScene(row, previousRow) {
+  return typeof row.fname === 'string' && Boolean(row.fname) && row.fname === previousRow.fname
+    && typeof row.scene === 'string' && Boolean(row.scene) && row.scene === previousRow.scene
+    && Number.isSafeInteger(previousRow.row) && Number.isSafeInteger(row.row) && row.row === previousRow.row + 1;
+}
+
+async function matchRows(rows, gameId, capture, { previousCapture, findPreviousRows, allowStandalone }) {
+  validateRows(rows, gameId);
   if (rows.length >= pageSize) return { status: 'ambiguous' };
 
-  const target = normalize(captured);
   const dialogues = rows.map(row => {
     const dialogue = dialogueFromMarkup(row.jpnHtmlText);
-    return { row, fullText: dialogue === null ? null : normalize(dialogue) };
+    return {
+      row,
+      fullText: dialogue === null ? null : normalize(dialogue),
+      targets: targetsForSpeaker(row, capture),
+    };
   });
-  const candidates = dialogues.filter(({ row, fullText }) => (fullText ?? normalize(row.jpnSearchText)) === target);
-  if (candidates.length > 1) return { status: 'ambiguous' };
-  const candidate = candidates[0];
-  if (candidate?.fullText && candidate.row.engSearchText?.trim()) {
-    const { engSearchText, engChrName } = candidate.row;
-    const speaker = typeof engChrName === 'string' ? engChrName.trim() : '';
-    return { status: 'matched', english: engSearchText.trim(), ...(speaker && { speaker }) };
+  const candidates = dialogues.filter(({ row, fullText, targets }) => targets.includes(fullText ?? normalize(row.jpnSearchText)));
+  const partials = dialogues.filter(({ fullText, targets }) => targets.some(text => fullText?.includes(text)));
+  // Cold Steel III's extractor preserves the game's textbox breaks in both languages.
+  const boxes = gameId === coldSteelIII ? matchingBoxes(partials) : [];
+  const matches = [
+    ...candidates.map(({ row, fullText }) => ({
+      row,
+      startsRow: true,
+      result: fullText && row.engSearchText?.trim() ? matched(row, row.engSearchText.trim()) : null,
+    })),
+    ...boxes.map(box => {
+      const english = boxLocalization(box);
+      return {
+        row: box.row, startsRow: box.index === 0, previousBox: box.previousBox,
+        result: english ? matched(box.row, english) : null,
+      };
+    }),
+  ];
+  const agreed = agreedMatch(matches);
+  if (agreed) return agreed;
+  if (matches.length > 1) {
+    const ambiguous = { status: 'ambiguous' };
+    const inContext = previousCapture ? matches.filter(({ row, previousBox }) => previousBox
+      && targetsForSpeaker(row, previousCapture).includes(previousBox)) : [];
+    if (inContext.length) return agreedMatch(inContext) ?? ambiguous;
+
+    if (findPreviousRows && matches.some(({ startsRow }) => startsRow)) {
+      const previousRows = await findPreviousRows();
+      const adjacent = matches.filter(({ row, startsRow }) => startsRow
+        && previousRows.some(previousRow => followsInScene(row, previousRow)));
+      if (adjacent.length) return agreedMatch(adjacent) ?? ambiguous;
+    }
+
+    // Use the whole-row spelling when the same speaker's alternatives only vary in stretched exclamations.
+    if (allowStandalone && candidates.length === 1 && matches.every(({ row }) => matchesCapturedSpeaker(row, capture))) {
+      return agreedMatch(matches, compactExclamations) ?? ambiguous;
+    }
+    return ambiguous;
   }
-  if (!candidate && dialogues.some(({ fullText }) => fullText?.includes(target))) return { status: 'partial' };
+  if (!candidates.length && partials.length) return { status: 'partial' };
   return { status: 'unmatched' };
 }
 
@@ -108,12 +231,21 @@ export function createTitdb(fetcher = fetch) {
     return catalogRequest;
   }
 
-  async function lookup(gameId, text) {
-    const [q, ...otherTerms] = searchTerms(text);
+  async function lookup(gameId, text, source, previousText) {
+    const coldSteelIIIAgent = source === 'agent' && gameId === coldSteelIII;
+    const lookupText = coldSteelIIIAgent ? fixColdSteelIIIHeart(text) : text;
+    const [q, ...otherTerms] = searchTerms(lookupText);
     if (!q) return { status: 'unmatched' };
     if (!(await games()).some(game => game.id === gameId)) return { status: 'unmatched' };
 
-    const key = JSON.stringify([gameId, text]);
+    const agentCapture = source === 'agent' ? splitAgentCapture(lookupText) : null;
+    const capture = comparisonCapture(lookupText, agentCapture);
+    const previousLookupText = coldSteelIIIAgent && previousText ? fixColdSteelIIIHeart(previousText) : null;
+    const previousAgentCapture = previousLookupText ? splitAgentCapture(previousLookupText) : null;
+    const previousCapture = previousLookupText ? comparisonCapture(previousLookupText, previousAgentCapture) : null;
+    const bodyTerms = agentCapture ? searchTerms(agentCapture.dialogue) : [];
+    const searchUsedPrefix = bodyTerms.length > 0 && !bodyTerms.includes(q);
+    const key = JSON.stringify([gameId, lookupText, Boolean(agentCapture), previousCapture]);
     const cached = cache.get(key);
     if (cached && cached.expires > Date.now()) return cached.result;
     if (inFlight.has(key)) return inFlight.get(key);
@@ -122,17 +254,31 @@ export function createTitdb(fetcher = fetch) {
     const search = term => getJson('/api/script/search', {
       q: term, game_id: gameId, strict_search: true, page_number: 1, page_size: pageSize,
     });
+    const [previousTerm] = searchTerms(previousAgentCapture?.dialogue ?? previousLookupText ?? '');
+    let previousRowsRequest;
+    const findPreviousRows = previousTerm ? () => previousRowsRequest ??= search(previousTerm)
+      .then(rows => rowsEndingWithCapture(rows, gameId, previousCapture))
+      .catch(() => []) : null;
+    const matchOptions = { previousCapture, findPreviousRows, allowStandalone: coldSteelIIIAgent };
     const request = search(q).then(async rows => {
-      const first = matchRows(rows, gameId, text);
-      if (first.status === 'matched' || first.status === 'ambiguous') return first;
+      const first = await matchRows(rows, gameId, capture, matchOptions);
+      if (first.status === 'matched') return first;
+      if (first.status === 'ambiguous') {
+        // A broad search of the first line may only have found mentions of the speaker.
+        if (rows.length < pageSize || !searchUsedPrefix) return first;
+        const second = await matchRows(await search(bodyTerms[0]), gameId, capture, matchOptions);
+        return second.status === 'unmatched' ? first : second;
+      }
 
       // Use another part of the capture when the longest phrase differs on the site.
       // A shorter prefix also handles captures that join lines without spaces.
-      const alternatives = [...otherTerms, wideDigits(q), narrowDigits(q)];
+      const fullTextAlternatives = agentCapture && first.status === 'partial' ? [] : otherTerms;
+      const alternatives = [...bodyTerms, ...fullTextAlternatives, wideDigits(q), narrowDigits(q)];
       if (!rows.length) alternatives.push([...q].slice(0, 12).join(''));
       const fallback = alternatives.find(term => term !== q && japanese.test(term));
       if (!fallback) return first;
-      const second = matchRows(await search(fallback), gameId, text);
+      const second = await matchRows(await search(fallback), gameId, capture, matchOptions);
+      if (first.status === 'partial' && second.status === 'ambiguous') return first;
       return second.status === 'unmatched' ? first : second;
     }).then(result => {
       cache.delete(key);

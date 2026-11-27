@@ -14,14 +14,17 @@ const scroll = element('log-scroll');
 const empty = element('empty');
 const emptyMessage = element('empty-message');
 const entries = element('entries');
+const hideEnglish = element('hide-english');
 const clear = element('clear');
 const logLimit = 20;
+const englishByEntry = new WeakMap();
 
 const addresses = { ...sources };
 let currentSource = source.value;
 let socket;
 let connectTimer;
 let activeLookup;
+let previousAgentCapture;
 const lookupQueue = [];
 
 function setConnection(state, label, message = '') {
@@ -41,6 +44,7 @@ function disconnect(state, label, message) {
   clearTimeout(connectTimer);
   const previous = socket;
   socket = undefined;
+  previousAgentCapture = undefined;
   previous?.close();
   setConnection(state, label, message);
 }
@@ -82,7 +86,7 @@ form.addEventListener('submit', event => {
   connection.addEventListener('message', event => {
     if (socket !== connection) return;
     const text = decodeCapture(kind, event.data);
-    if (text !== null) prependEntry(text);
+    if (text !== null) prependEntry(text, kind);
   });
   connection.addEventListener('close', () => {
     if (socket !== connection) return;
@@ -116,7 +120,14 @@ function isFollowingLog() {
     && !(selection && !selection.isCollapsed && scroll.contains(selection.anchorNode));
 }
 
-function prependEntry(text) {
+function updateEnglishVisibility(entry) {
+  const english = englishByEntry.get(entry);
+  if (!english) return;
+  if (hideEnglish.checked) english.remove();
+  else entry.append(english);
+}
+
+function prependEntry(text, captureSource) {
   const following = isFollowingLog();
   const entry = document.createElement('li');
   entry.className = 'entry';
@@ -138,25 +149,29 @@ function prependEntry(text) {
   clear.disabled = false;
   if (following) scroll.scrollTop = 0;
 
-  if (!game.value) status.textContent = 'Choose a game to look up English for new lines.';
+  const gameId = Number(game.value);
+  const previousText = captureSource === 'agent' && previousAgentCapture?.gameId === gameId
+    ? previousAgentCapture.text : undefined;
+  previousAgentCapture = captureSource === 'agent' && gameId && text.length <= 1000 ? { gameId, text } : undefined;
+  if (!gameId) status.textContent = 'Choose a game to look up English for new lines.';
   else if (text.length > 1000) status.textContent = 'Line too long for lookup.';
   else {
     status.textContent = 'Looking up English…';
-    lookupQueue.push({ gameId: Number(game.value), text, status });
+    lookupQueue.push({ gameId, text, captureSource, previousText, status });
     runLookupQueue();
   }
 }
 
 async function runLookupQueue() {
   if (activeLookup || !lookupQueue.length) return;
-  const { gameId, text, status } = lookupQueue.shift();
+  const { gameId, text, captureSource, previousText, status } = lookupQueue.shift();
   const controller = new AbortController();
   activeLookup = controller;
   try {
     const response = await fetch('/api/lookup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ gameId, text }),
+      body: JSON.stringify({ gameId, text, source: captureSource, previousText }),
       signal: controller.signal,
     });
     if (response.status === 429) {
@@ -177,7 +192,10 @@ async function runLookupQueue() {
         english.append(speaker);
       }
       english.append(result.english);
-      status.replaceWith(english);
+      const entry = status.parentElement;
+      englishByEntry.set(entry, english);
+      status.remove();
+      updateEnglishVisibility(entry);
       if (following) scroll.scrollTop = 0;
     } else {
       const messages = {
@@ -194,12 +212,19 @@ async function runLookupQueue() {
   }
 }
 
+hideEnglish.addEventListener('change', () => {
+  const following = isFollowingLog();
+  for (const entry of entries.children) updateEnglishVisibility(entry);
+  if (following) scroll.scrollTop = 0;
+});
 clear.addEventListener('click', () => {
+  previousAgentCapture = undefined;
   lookupQueue.length = 0;
   activeLookup?.abort();
   entries.replaceChildren();
   empty.hidden = false;
   clear.disabled = true;
 });
+game.addEventListener('change', () => { previousAgentCapture = undefined; });
 retryCatalog.addEventListener('click', loadCatalog);
 loadCatalog();

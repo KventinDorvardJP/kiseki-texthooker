@@ -43,15 +43,18 @@ const server = createServer(async (request, response) => {
       request.setEncoding('utf8');
       for await (const chunk of request) {
         body += chunk;
-        if (body.length > 8192) return json(response, 413, { status: 'invalid' });
+        if (body.length > 16384) return json(response, 413, { status: 'invalid' });
       }
       let input;
       try { input = JSON.parse(body); } catch { return json(response, 400, { status: 'invalid' }); }
       if (!Number.isSafeInteger(input?.gameId) || input.gameId < 1 || typeof input.text !== 'string'
-          || !input.text.trim() || input.text.length > maxLineLength) {
+          || !input.text.trim() || input.text.length > maxLineLength
+          || (input.source !== undefined && input.source !== 'agent' && input.source !== 'luna')
+          || (input.previousText !== undefined && (typeof input.previousText !== 'string'
+            || !input.previousText.trim() || input.previousText.length > maxLineLength))) {
         return json(response, 400, { status: 'invalid' });
       }
-      return json(response, 200, await titdb.lookup(input.gameId, input.text));
+      return json(response, 200, await titdb.lookup(input.gameId, input.text, input.source, input.previousText));
     }
     return json(response, 404, { status: 'missing' });
   } catch (error) {

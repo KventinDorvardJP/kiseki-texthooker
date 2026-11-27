@@ -45,7 +45,10 @@
     <section class="reader" aria-labelledby="reader-title">
       <div class="reader-header">
         <h2 id="reader-title">Reading log</h2>
-        <button id="clear" class="secondary" type="button" disabled>Clear log</button>
+        <div class="reader-actions">
+          <label class="english-toggle"><input id="hide-english" type="checkbox"> Hide English localization</label>
+          <button id="clear" class="secondary" type="button" disabled>Clear log</button>
+        </div>
       </div>
       <div class="log-scroll" id="log-scroll">
         <div class="empty" id="empty">
