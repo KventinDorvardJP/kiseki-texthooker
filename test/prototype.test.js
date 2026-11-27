@@ -216,6 +216,150 @@ test('formatting tolerance preserves numeric values and inline dashes', async ()
   assert.deepEqual(await fixture([withInlineDash]).lookup(8, '次の授業は魔法です。'), { status: 'unmatched' });
 });
 
+test('a punctuation-width retry finds the complete OCR textbox before a generic fallback', async () => {
+  const segment = '鍵はここにあったんですね';
+  const dialogue = {
+    ...boxedRow,
+    jpnHtmlText: '……そうか。<br/>' + segment + '？<br/><br/>急いで知らせよう。',
+    jpnSearchText: '……そうか。 ' + segment + '？ 急いで知らせよう。',
+    engHtmlText: 'Right. The key was here?<br/><br/>Let’s tell them quickly.',
+    engSearchText: 'Right. The key was here? Let’s tell them quickly.',
+  };
+  const queries = [];
+  const database = fixture(query => {
+    queries.push(query);
+    if (query === 'そうか。') return Array(24).fill(dialogue);
+    return query === segment + '？' ? [dialogue] : [];
+  });
+  assert.deepEqual(await database.lookup(8, '......そうか。\n' + segment + '?', 'luna'), {
+    status: 'matched', speaker: 'Test speaker', english: 'Right. The key was here?',
+  });
+  assert.deepEqual(queries, [segment + '?', segment + '？']);
+  assert.deepEqual(await database.lookup(8, '......そうか。\n' + segment + '!', 'luna'), { status: 'unmatched' });
+});
+
+test('Luna OCR may omit a pause before an opening question mark on its own line', async () => {
+  const dialogue = {
+    ...row,
+    jpnSearchText: '……？ さっきから何の話を──',
+    jpnHtmlText: '……？<br/>さっきから何の話を──',
+    engSearchText: '...? What are you talking about--',
+  };
+  const capture = '?\nさっきから何の話を';
+  const database = fixture([dialogue]);
+  assert.deepEqual(await database.lookup(8, capture, 'luna'), {
+    status: 'matched', speaker: 'Test speaker', english: dialogue.engSearchText,
+  });
+  assert.deepEqual(await database.lookup(8, capture), { status: 'partial' });
+  assert.deepEqual(await database.lookup(8, '!\nさっきから何の話を', 'luna'), { status: 'unmatched' });
+  const competing = { ...dialogue, jpnHtmlText: '？<br/>さっきから何の話を──', engSearchText: 'What did you say?' };
+  assert.deepEqual(await fixture([dialogue, competing]).lookup(8, capture, 'luna'), { status: 'ambiguous' });
+});
+
+test('Luna OCR may omit a leading ellipsis in a complete textbox', async () => {
+  const dialogue = {
+    ...boxedRow,
+    jpnHtmlText: '……そういえば、あの二人も<br/>きっと事情を知っている……<br/><br/>あとで確認しよう。',
+    jpnSearchText: '……そういえば、あの二人も きっと事情を知っている…… あとで確認しよう。',
+    engHtmlText: 'Come to think of it, those two probably know.<br/><br/>Let’s check later.',
+    engSearchText: 'Come to think of it, those two probably know. Let’s check later.',
+  };
+  const capture = 'そういえば、あの二人も\nきっと事情を知っている......';
+  const database = fixture([dialogue]);
+  assert.deepEqual(await database.lookup(8, capture, 'luna'), {
+    status: 'matched', speaker: 'Test speaker', english: 'Come to think of it, those two probably know.',
+  });
+  assert.deepEqual(await database.lookup(8, capture, 'agent'), { status: 'partial' });
+  assert.deepEqual(await database.lookup(8, 'きっと事情を知っている......', 'luna'), { status: 'partial' });
+});
+
+test('Luna OCR can search an intact clause when it joins lines while checking the entire dialogue', async () => {
+  const clause = '二人ともお知り合いなんでしょう';
+  const tail = 'どう考えても';
+  const dialogue = {
+    ...row,
+    jpnHtmlText: 'でも、あのお二人は、<br/>' + clause + '！？<br/>' + tail + '──',
+    jpnSearchText: 'でも、あのお二人は、 ' + clause + '！？ ' + tail + '──',
+    engSearchText: 'But you two know each other, right?! Why would you--',
+  };
+  const queries = [];
+  const database = fixture(query => {
+    queries.push(query);
+    return query === clause ? [dialogue] : [];
+  });
+  const capture = 'でも、あのお二人は、\n' + clause + '!?' + tail;
+  assert.deepEqual(await database.lookup(8, capture, 'luna'), {
+    status: 'matched', speaker: 'Test speaker', english: dialogue.engSearchText,
+  });
+  assert.deepEqual(queries, [clause + '!?' + tail, clause]);
+  assert.deepEqual(await database.lookup(8, capture.replace('どう考えても', 'いくらなんでも'), 'luna'), {
+    status: 'unmatched',
+  });
+});
+
+test('Luna OCR retries with short anchors when it flattens line breaks inside a sentence', async () => {
+  const start = 'あの二人はここに残って';
+  const middle = 'もう少し話し合うつもりだと';
+  const end = '“先生”が言っていました？';
+  const dialogue = {
+    ...row,
+    jpnHtmlText: [start, middle, end].join('<br/>'),
+    jpnSearchText: [start, middle, end].join(' '),
+    engSearchText: 'Did the teacher say those two planned to stay and talk a little longer?',
+  };
+  const flattened = start + middle + end.replace('？', '?');
+  const prefix = [...flattened].slice(0, 10).join('');
+  const suffix = [...flattened.slice(0, -1)].slice(-10).join('');
+  const queries = [];
+  const database = fixture(query => {
+    queries.push(query);
+    if (query === prefix) return Array(24).fill(dialogue);
+    return query === suffix ? [dialogue] : [];
+  });
+  assert.deepEqual(await database.lookup(8, flattened, 'luna'), {
+    status: 'matched', speaker: 'Test speaker', english: dialogue.engSearchText,
+  });
+  assert.deepEqual(queries, [flattened, flattened.replace('?', '？'), prefix, suffix]);
+  assert.deepEqual(await database.lookup(8, flattened.replace('話し合う', '踊り出す'), 'luna'), { status: 'ambiguous' });
+});
+
+test('Luna OCR may omit a leading dialogue dash while unpaired inline dashes still matter', async () => {
+  const dialogue = {
+    ...row,
+    jpnHtmlText: '──次の授業は<br/>魔法です。',
+    jpnSearchText: '──次の授業は 魔法です。',
+  };
+  const database = fixture([dialogue]);
+  assert.deepEqual(await database.lookup(8, japanese, 'luna'), {
+    status: 'matched', speaker: 'Test speaker', english: dialogue.engSearchText,
+  });
+  assert.deepEqual(await database.lookup(8, japanese, 'agent'), { status: 'partial' });
+  const inlineDash = { ...dialogue, jpnHtmlText: '次の授業は─魔法です。' };
+  assert.deepEqual(await fixture([inlineDash]).lookup(8, japanese, 'luna'), { status: 'unmatched' });
+});
+
+test('Luna OCR may omit one inline dialogue pause in a complete textbox', async () => {
+  const dialogue = {
+    ...boxedRow,
+    jpnHtmlText: 'いや──今はまだ<br/>誰も来ていない。<br/><br/>でも、待ってみよう。',
+    jpnSearchText: 'いや──今はまだ 誰も来ていない。 でも、待ってみよう。',
+    engHtmlText: 'No. Nobody is here yet.<br/><br/>But let’s wait and see.',
+    engSearchText: 'No. Nobody is here yet. But let’s wait and see.',
+  };
+  const text = 'いや今はまだ\n誰も来ていない。';
+  const database = fixture([dialogue]);
+  assert.deepEqual(await database.lookup(8, text, 'luna'), {
+    status: 'matched', speaker: 'Test speaker', english: 'No. Nobody is here yet.',
+  });
+  assert.deepEqual(await database.lookup(8, text, 'agent'), { status: 'unmatched' });
+  assert.deepEqual(await database.lookup(8, 'いや今はまだ\n誰も来ない。', 'luna'), { status: 'unmatched' });
+
+  const twoPauses = { ...dialogue, jpnHtmlText: dialogue.jpnHtmlText.replace('誰も来て', '誰も──来て') };
+  assert.deepEqual(await fixture([twoPauses]).lookup(8, text, 'luna'), { status: 'unmatched' });
+  const competing = { ...row, jpnHtmlText: text.replace('\n', '<br/>'), engSearchText: 'Nobody came yet.' };
+  assert.deepEqual(await fixture([dialogue, competing]).lookup(8, text, 'luna'), { status: 'ambiguous' });
+});
+
 test('Cold Steel III Agent searches for a heart when the capture contains its CP932 substitute', async () => {
   const dialogue = {
     ...row,

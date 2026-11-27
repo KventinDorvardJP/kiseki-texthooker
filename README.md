@@ -22,7 +22,9 @@ Check **Hide English localization** beside **Clear log** to read in Japanese whi
 
 ## Matching and checks
 
-The prototype can search using part of the capture, then compares the full captured Japanese against the database dialogue. The comparison ignores whitespace, ruby readings, digit width, and dialogue dashes at line endings. It also treats Japanese ellipses and runs of three or more periods as equivalent. The reading log keeps the Japanese as received.
+The prototype can search using part of the capture, then compares the full captured Japanese against the database dialogue. The comparison ignores whitespace, ruby readings, width differences in digits and question or exclamation marks, and dialogue dashes at line endings. It treats Japanese ellipses and runs of three or more periods as equivalent. The reading log keeps the Japanese as received.
+
+When LunaTranslator OCR flattens line breaks, lookup can retry with an intact clause or up to two short phrases. It can also tolerate a dropped opening ellipsis, a dropped leading `──`, or one `──` pause between Japanese characters. The full captured dialogue still has to match before the app shows English.
 
 Trails of Cold Steel III entries can span multiple dialogue boxes. When a capture matches a complete box and TITDB preserves the same box structure in both languages, the app shows that box’s English. Incomplete boxes, ambiguous matches, and searches that hit the result limit leave English blank.
 
