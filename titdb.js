@@ -1,15 +1,26 @@
 const japanese = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
 const pageSize = 24;
+const cacheLimit = 20;
 export const maxLineLength = 1000;
 
-export function searchTerm(text) {
+function searchTerms(text) {
   // The TITDB search switches to English for ASCII letters and certain punctuation.
   // Use a Japanese substring for discovery, then compare the entire row locally.
   const phrases = text.match(/[^\sa-zA-Z.,:;'%_\\]+/gu) ?? [];
-  return phrases.filter(phrase => japanese.test(phrase)).sort((a, b) => b.length - a.length)[0] ?? '';
+  return phrases.filter(phrase => japanese.test(phrase)).sort((a, b) => b.length - a.length);
 }
 
-const normalize = text => text.normalize('NFC').replace(/\s/gu, '');
+const narrowDigits = text => text.replace(/[０-９]/gu, digit => digit.normalize('NFKC'));
+const wideDigits = text => text.replace(/[0-9]/gu, digit => String.fromCharCode(digit.charCodeAt(0) + 0xfee0));
+
+function normalize(text) {
+  // Some captures omit dialogue dashes just before a line break. Keep inline dashes.
+  const withoutLineEndDashes = text.replace(/[—―─]+(?=[^\S\r\n]*(?:\r\n?|\n|$))/gu, '');
+  return narrowDigits(withoutLineEndDashes.normalize('NFC'))
+    .replace(/…+|[.．]{3,}/gu, '…')
+    .replace(/\s/gu, '');
+}
+
 const entities = { amp: '&', apos: "'", quot: '"', lt: '<', gt: '>', nbsp: ' ' };
 
 function dialogueFromMarkup(markup) {
@@ -34,16 +45,20 @@ function matchRows(rows, gameId, captured) {
   if (rows.length >= pageSize) return { status: 'ambiguous' };
 
   const target = normalize(captured);
-  const candidates = rows.filter(row => {
+  const dialogues = rows.map(row => {
     const dialogue = dialogueFromMarkup(row.jpnHtmlText);
-    return dialogue === null ? normalize(row.jpnSearchText) === target : normalize(dialogue) === target;
+    return { row, fullText: dialogue === null ? null : normalize(dialogue) };
   });
+  const candidates = dialogues.filter(({ row, fullText }) => (fullText ?? normalize(row.jpnSearchText)) === target);
   if (candidates.length > 1) return { status: 'ambiguous' };
   const candidate = candidates[0];
-  if (!candidate || dialogueFromMarkup(candidate.jpnHtmlText) === null || !candidate.engSearchText?.trim()) {
-    return { status: 'unmatched' };
+  if (candidate?.fullText && candidate.row.engSearchText?.trim()) {
+    const { engSearchText, engChrName } = candidate.row;
+    const speaker = typeof engChrName === 'string' ? engChrName.trim() : '';
+    return { status: 'matched', english: engSearchText.trim(), ...(speaker && { speaker }) };
   }
-  return { status: 'matched', english: candidate.engSearchText.trim() };
+  if (!candidate && dialogues.some(({ fullText }) => fullText?.includes(target))) return { status: 'partial' };
+  return { status: 'unmatched' };
 }
 
 export class RateLimit extends Error {}
@@ -94,7 +109,7 @@ export function createTitdb(fetcher = fetch) {
   }
 
   async function lookup(gameId, text) {
-    const q = searchTerm(text);
+    const [q, ...otherTerms] = searchTerms(text);
     if (!q) return { status: 'unmatched' };
     if (!(await games()).some(game => game.id === gameId)) return { status: 'unmatched' };
 
@@ -107,14 +122,21 @@ export function createTitdb(fetcher = fetch) {
     const search = term => getJson('/api/script/search', {
       q: term, game_id: gameId, strict_search: true, page_number: 1, page_size: pageSize,
     });
-    const request = search(q).then(rows => {
-      // Some hooks omit line breaks that TITDB stores as spaces in its search field.
-      const prefix = q.slice(0, 12);
-      return Array.isArray(rows) && !rows.length && q !== prefix && japanese.test(prefix) ? search(prefix) : rows;
-    }).then(rows => {
-      const result = matchRows(rows, gameId, text);
+    const request = search(q).then(async rows => {
+      const first = matchRows(rows, gameId, text);
+      if (first.status === 'matched' || first.status === 'ambiguous') return first;
+
+      // Use another part of the capture when the longest phrase differs on the site.
+      // A shorter prefix also handles captures that join lines without spaces.
+      const alternatives = [...otherTerms, wideDigits(q), narrowDigits(q)];
+      if (!rows.length) alternatives.push([...q].slice(0, 12).join(''));
+      const fallback = alternatives.find(term => term !== q && japanese.test(term));
+      if (!fallback) return first;
+      const second = matchRows(await search(fallback), gameId, text);
+      return second.status === 'unmatched' ? first : second;
+    }).then(result => {
       cache.delete(key);
-      if (cache.size >= 128) cache.delete(cache.keys().next().value);
+      if (cache.size >= cacheLimit) cache.delete(cache.keys().next().value);
       cache.set(key, { result, expires: Date.now() + (result.status === 'matched' ? 10 : 1) * 60_000 });
       return result;
     }).finally(() => inFlight.delete(key));

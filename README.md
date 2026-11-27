@@ -14,13 +14,13 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765) in the browser where you use
 
 1. Start Agent or LunaTranslator and enable its WebSocket service.
 2. Choose the source in the texthooker, check its address, and click **Connect**. The suggested Agent port is `9001`. For LunaTranslator, use its configured port and keep `/api/ws/text/origin` in the URL.
-3. Choose the game you are playing. New lines appear as soon as they arrive. When the matching localization is found, it appears beneath the Japanese. Use Yomitan on the Japanese text as you would on another webpage.
+3. Choose the game you are playing. New lines appear at the top. When the matching localization is found, it appears beneath the Japanese with the English speaker name if available. Use Yomitan on the Japanese text as you would on another webpage.
 
-The browser reads from the source on your machine. The Node server sends game-scoped text queries to Trails in the Database. The reading log is kept in the browser tab for the current session.
+The browser reads from the source on your machine. The Node server sends game-scoped text queries to Trails in the Database. The reading log keeps the latest 20 entries in the browser tab.
 
 ## Matching and checks
 
-The prototype compares the full captured Japanese against the database dialogue, ignoring whitespace and ruby readings for matching. It keeps the captured text as received. It leaves English blank for partial lines, multiple candidate rows, and search results that hit the result limit. Some lines can still go unmatched when extraction and database formatting differ.
+The prototype can search using part of the capture, then compares the full captured Japanese against the database dialogue. The comparison ignores whitespace, ruby readings, digit width, and dialogue dashes at line endings. It also treats Japanese ellipses and runs of three or more periods as equivalent. The reading log keeps the Japanese as received. English stays blank for fragments of longer entries, multiple candidate rows, and searches that hit the result limit.
 
 Run `npm test` for the capture parser and matching checks.
 

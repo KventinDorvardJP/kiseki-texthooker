@@ -15,6 +15,7 @@ const empty = element('empty');
 const emptyMessage = element('empty-message');
 const entries = element('entries');
 const clear = element('clear');
+const logLimit = 20;
 
 const addresses = { ...sources };
 let currentSource = source.value;
@@ -81,7 +82,7 @@ form.addEventListener('submit', event => {
   connection.addEventListener('message', event => {
     if (socket !== connection) return;
     const text = decodeCapture(kind, event.data);
-    if (text !== null) appendEntry(text);
+    if (text !== null) prependEntry(text);
   });
   connection.addEventListener('close', () => {
     if (socket !== connection) return;
@@ -111,11 +112,11 @@ async function loadCatalog() {
 
 function isFollowingLog() {
   const selection = window.getSelection();
-  return scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop < 24
+  return scroll.scrollTop < 24
     && !(selection && !selection.isCollapsed && scroll.contains(selection.anchorNode));
 }
 
-function appendEntry(text) {
+function prependEntry(text) {
   const following = isFollowingLog();
   const entry = document.createElement('li');
   entry.className = 'entry';
@@ -127,13 +128,18 @@ function appendEntry(text) {
   status.className = 'entry-status';
   entry.append(japanese, status);
   empty.hidden = true;
-  entries.append(entry);
+  entries.prepend(entry);
+  if (entries.childElementCount > logLimit) {
+    const oldest = entries.lastElementChild;
+    const pendingIndex = lookupQueue.findIndex(job => oldest.contains(job.status));
+    if (pendingIndex !== -1) lookupQueue.splice(pendingIndex, 1);
+    oldest.remove();
+  }
   clear.disabled = false;
-  if (following) scroll.scrollTop = scroll.scrollHeight;
+  if (following) scroll.scrollTop = 0;
 
   if (!game.value) status.textContent = 'Choose a game to look up English for new lines.';
   else if (text.length > 1000) status.textContent = 'Line too long for lookup.';
-  else if (lookupQueue.length >= 20) status.textContent = 'Lookup queue full.';
   else {
     status.textContent = 'Looking up English…';
     lookupQueue.push({ gameId: Number(game.value), text, status });
@@ -165,11 +171,20 @@ async function runLookupQueue() {
       const english = document.createElement('p');
       english.className = 'dialogue english';
       english.lang = 'en';
-      english.textContent = result.english;
+      if (typeof result.speaker === 'string' && result.speaker) {
+        const speaker = document.createElement('strong');
+        speaker.textContent = `${result.speaker}: `;
+        english.append(speaker);
+      }
+      english.append(result.english);
       status.replaceWith(english);
-      if (following) scroll.scrollTop = scroll.scrollHeight;
+      if (following) scroll.scrollTop = 0;
     } else {
-      status.textContent = result.status === 'ambiguous' ? 'No unique match.' : 'No matching localization.';
+      const messages = {
+        ambiguous: 'No unique match.',
+        partial: 'Found in a longer dialogue entry.',
+      };
+      status.textContent = messages[result.status] ?? 'No matching localization.';
     }
   } catch {
     if (status.isConnected) status.textContent = 'Lookup unavailable.';
