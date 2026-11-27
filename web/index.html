@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Kiseki Texthooker</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <h1>Kiseki <span>Texthooker</span></h1>
+      </div>
+      <p class="connection-state" id="connection-state" data-state="idle" role="status">Disconnected</p>
+    </div>
+  </header>
+  <main class="workspace">
+    <aside class="sidebar" aria-labelledby="setup-title">
+      <h2 id="setup-title">Capture setup</h2>
+      <form id="connection-form">
+        <label for="source">Text source</label>
+        <select id="source">
+          <option value="agent">Agent</option>
+          <option value="luna">LunaTranslator</option>
+        </select>
+        <label for="websocket-url">WebSocket URL</label>
+        <input id="websocket-url" type="url" value="ws://127.0.0.1:9001" spellcheck="false" autocomplete="off" required>
+        <button id="connection-button" class="primary" type="submit">Connect</button>
+        <p class="field-message" id="connection-message" role="status" hidden></p>
+      </form>
+      <div class="game-picker">
+        <label for="game">Game</label>
+        <select id="game" disabled>
+          <option value="">Loading catalog…</option>
+        </select>
+        <p class="field-message" id="game-message">Used to look up English in Trails in the Database.</p>
+        <button id="retry-catalog" class="secondary" type="button" hidden>Retry catalog</button>
+      </div>
+    </aside>
+
+    <section class="reader" aria-labelledby="reader-title">
+      <div class="reader-header">
+        <h2 id="reader-title">Reading log</h2>
+        <button id="clear" class="secondary" type="button" disabled>Clear log</button>
+      </div>
+      <div class="log-scroll" id="log-scroll">
+        <div class="empty" id="empty">
+          <div class="empty-mark" aria-hidden="true">文</div>
+          <h3>Waiting for Japanese text</h3>
+          <p id="empty-message">Connect to Agent or LunaTranslator to start capturing lines.</p>
+        </div>
+        <ol id="entries" class="entries" aria-label="Captured lines"></ol>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
